@@ -13,6 +13,10 @@ from app.models import JurisprudenciaResult, SearchResponse
 logger = logging.getLogger("cendoj_scraper")
 
 class CendojScraper:
+    # CENDOJ's results widget is JS-driven and can take 15-30s on a cold load, so
+    # the wait must be comfortably above real-world latency to avoid flaky timeouts.
+    RESULTS_TIMEOUT_MS = 60000
+
     def __init__(self, headless: Optional[bool] = None):
         # Allow override from env variable CENDOJ_HEADLESS, defaulting to True if not set
         if headless is None:
@@ -255,7 +259,7 @@ class CendojScraper:
         # Wait for search results inside the search results container
         logger.info("Waiting for search results container to load...")
         try:
-            await self.page.wait_for_selector('div#jurisprudenciaresults_searchresults a[id^="ref-"]', state="attached", timeout=25000)
+            await self.page.wait_for_selector('div#jurisprudenciaresults_searchresults a[id^="ref-"]', state="attached", timeout=self.RESULTS_TIMEOUT_MS)
         except Exception as e:
             # Check if there is an error message on page (e.g. no results found)
             body_text = await self.page.inner_text("body")
@@ -269,15 +273,52 @@ class CendojScraper:
         # Handle pagination if page_num > 1
         if page_num > 1:
             logger.info(f"Navigating to page {page_num}...")
-            for p in range(2, page_num + 1):
-                next_page_btn = self.page.locator(f'ul.pagination a:has-text("{p}")').first
-                if await next_page_btn.count() > 0:
-                    await next_page_btn.click()
-                    await self.page.wait_for_selector('div.loading-results', state="hidden", timeout=8000)
-                    await self.page.wait_for_selector('div#jurisprudenciaresults_searchresults a[id^="ref-"]', state="attached", timeout=8000)
-                else:
-                    logger.warning(f"Pagination button for page {p} not found. Stopping at page {p-1}.")
-                    break
+            # CENDOJ paginates through the JS helper `goToPage(...)`, reached from a
+            # hidden page selector. The anchor tags are inside a `display:none`
+            # dropdown, so Playwright cannot click them; call the helper instead.
+            jumped = await self.page.evaluate(
+                """(target) => {
+                    if (typeof goToPage !== 'function') return false;
+                    goToPage('jurisprudencia', target);
+                    return true;
+                }""",
+                page_num,
+            )
+
+            if not jumped:
+                logger.warning("goToPage() no está disponible; se intenta con el selector de página.")
+                goto_input = self.page.locator('input[name="gotopage"]').first
+                if await goto_input.count() == 0:
+                    raise RuntimeError(
+                        f"No se pudo navegar a la página {page_num}: el paginador del CENDOJ no está disponible."
+                    )
+                await goto_input.fill(str(page_num))
+                await goto_input.press("Enter")
+
+            try:
+                await self.page.wait_for_selector('div.loading-results', state="hidden", timeout=15000)
+                await self.page.wait_for_selector(
+                    'div#jurisprudenciaresults_searchresults a[id^="ref-"]',
+                    state="attached",
+                    timeout=self.RESULTS_TIMEOUT_MS,
+                )
+            except Exception as e:
+                raise RuntimeError(
+                    f"No se pudo cargar la página {page_num} de resultados: {e}"
+                ) from e
+
+            # Confirm the widget actually moved to the requested page instead of
+            # silently returning page 1 results.
+            current_page = await self.page.evaluate(
+                """() => {
+                    const input = document.querySelector('input[name="gotopage"]');
+                    return input ? parseInt(input.value, 10) : null;
+                }"""
+            )
+            if current_page is not None and current_page != page_num:
+                raise RuntimeError(
+                    f"Se solicitó la página {page_num} pero CENDOJ devolvió la página {current_page}."
+                )
 
         # Parse total results count
         body_text = await self.page.inner_text("body")
