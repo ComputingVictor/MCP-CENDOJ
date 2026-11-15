@@ -29,10 +29,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger("cendoj_api")
 
+# FastMCP 4.x removed `sse_app()`. `http_app(transport="sse")` exposes the same
+# SSE transport, and mounting it under /mcp keeps the documented /mcp/sse path.
+# Its lifespan must be attached to FastAPI so the MCP session manager starts
+# with the application.
+mcp_app = mcp.http_app(path="/sse", transport="sse")
+
 app = FastAPI(
     title="CENDOJ API & MCP Server",
     description="API REST y Servidor MCP para consultar resoluciones judiciales del CENDOJ",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=mcp_app.lifespan,
 )
 
 # Enable CORS for frontend integration
@@ -161,5 +168,5 @@ async def export_decision_markdown(
 
 # Mount MCP Server SSE Application
 logger.info("Mounting MCP SSE app under /mcp...")
-app.mount("/mcp", mcp.sse_app())
+app.mount("/mcp", mcp_app)
 

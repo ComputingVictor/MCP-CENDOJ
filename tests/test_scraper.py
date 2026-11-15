@@ -26,10 +26,26 @@ def test_scraper_search():
             
     first_result = run_async(run())
     pytest.shared_result = first_result  # save for subsequent tests
+    pytest.shared_page1_ecli = first_result.ecli
+
+def test_scraper_pagination():
+    # Regression: pagination used to click a hidden anchor and always time out.
+    async def run():
+        async with CendojScraper(headless=True) as scraper:
+            response = await scraper.search(query=TEST_QUERY, page_num=2)
+            assert response.total > 0
+            assert len(response.results) > 0
+            return response.results[0]
+
+    page2_first = run_async(run())
+    assert page2_first.url_pdf.startswith("http")
+    if getattr(pytest, "shared_page1_ecli", None) and page2_first.ecli:
+        assert page2_first.ecli != pytest.shared_page1_ecli, "page 2 returned the same first result as page 1"
 
 def test_scraper_pdf_download_and_cache():
     # Make sure search test ran first
-    assert hasattr(pytest, "shared_result")
+    if not hasattr(pytest, "shared_result"):
+        pytest.skip("requires a successful search (test_scraper_search)")
     first = pytest.shared_result
     
     async def run():
@@ -66,7 +82,8 @@ def test_scraper_pdf_download_and_cache():
     run_async(run())
 
 def test_descargar_pdf_resolucion():
-    assert hasattr(pytest, "shared_result")
+    if not hasattr(pytest, "shared_result"):
+        pytest.skip("requires a successful search (test_scraper_search)")
     first = pytest.shared_result
     
     async def run():
@@ -87,7 +104,8 @@ def test_descargar_pdf_resolucion():
     run_async(run())
 
 def test_exportar_resolucion_markdown():
-    assert hasattr(pytest, "shared_result")
+    if not hasattr(pytest, "shared_result"):
+        pytest.skip("requires a successful search (test_scraper_search)")
     first = pytest.shared_result
     
     async def run():
@@ -115,7 +133,7 @@ def test_exportar_resolucion_markdown():
             content = f.read()
             
         assert f"Resolución Judicial: {first.titulo}" in content
-        assert f"ROJ: {first.roj}" in content
+        assert f"**ROJ**: {first.roj}" in content
         assert "Texto Completo de la Resolución" in content
         
         # Clean up
